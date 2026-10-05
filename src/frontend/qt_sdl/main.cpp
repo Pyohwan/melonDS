@@ -41,6 +41,7 @@
 #include <QSocketNotifier>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <csignal>
 #endif
 
@@ -267,10 +268,18 @@ bool MelonApplication::event(QEvent *event)
 }
 
 #ifndef _WIN32
+// Only async-signal-safe calls are allowed in a signal handler. Calling qApp->quit() here
+// closes and destroys the windows while the interrupted main thread may be in the middle of
+// painting (between QBackingStore::beginPaint and endPaint), which then crashes on the
+// destroyed platform window (Wayland) or deadlocks on locks held by the interrupted code.
+// Just wake up the event loop through a pipe instead, see sigNotifier in main().
+static int sigPipe[2] = {-1, -1};
+
 static void signalHandler(int signal)
 {
-    std::signal(signal, SIG_DFL);
-    qApp->quit();
+    char c = (char)signal;
+    ssize_t r = write(sigPipe[1], &c, 1);
+    (void)r;
 }
 #endif
 
@@ -315,8 +324,11 @@ int main(int argc, char** argv)
         }
     }
 #else
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
+    if (pipe2(sigPipe, O_CLOEXEC | O_NONBLOCK) == 0)
+    {
+        std::signal(SIGINT, signalHandler);
+        std::signal(SIGTERM, signalHandler);
+    }
 #endif
 
     printf("melonDS " MELONDS_VERSION "\n");
@@ -327,6 +339,24 @@ int main(int argc, char** argv)
         printf("did you just call me a derp???\n");
 
     MelonApplication melon(argc, argv);
+
+#ifndef _WIN32
+    if (sigPipe[0] != -1)
+    {
+        auto sigNotifier = new QSocketNotifier(sigPipe[0], QSocketNotifier::Read, &melon);
+        QObject::connect(sigNotifier, &QSocketNotifier::activated, &melon, [&melon]()
+        {
+            char c;
+            ssize_t r = read(sigPipe[0], &c, 1);
+            (void)r;
+
+            // a second signal terminates right away, like before
+            std::signal(SIGINT, SIG_DFL);
+            std::signal(SIGTERM, SIG_DFL);
+            melon.quit();
+        });
+    }
+#endif
     pathInit();
 
     CLI::CommandLineOptions* options = CLI::ManageArgs(melon);
