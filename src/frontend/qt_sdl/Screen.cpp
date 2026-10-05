@@ -17,6 +17,9 @@
 */
 
 #include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
 
 #include <optional>
 #include <cmath>
@@ -795,6 +798,24 @@ void ScreenPanelNative::drawScreen()
     bufferLock.unlock();
 }
 
+// frametime logger (env FRAMETIME_LOG): one CLOCK_MONOTONIC timestamp (us) per presented frame
+static void logFrameTime()
+{
+    static FILE* ftLog = nullptr;
+    static bool ftInit = false;
+    if (!ftInit)
+    {
+        const char* p = getenv("FRAMETIME_LOG");
+        if (p) ftLog = fopen(p, "w");
+        ftInit = true;
+    }
+    if (!ftLog) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    fprintf(ftLog, "%lld\n", (long long)(ts.tv_sec * 1000000LL + ts.tv_nsec / 1000));
+    fflush(ftLog);
+}
+
 void ScreenPanelNative::paintEvent(QPaintEvent* event)
 {
     QPainter painter(this);
@@ -824,6 +845,7 @@ void ScreenPanelNative::paintEvent(QPaintEvent* event)
             painter.drawImage(screenrc, screen[screenKind[i]]);
         }
         emuInstance->renderLock.unlock();
+        logFrameTime();
     }
 
     osdUpdate();
@@ -1261,6 +1283,7 @@ void ScreenPanelGL::drawScreen()
     }
 
     glContext->SwapBuffers();
+    if (emuThread->emuIsActive()) logFrameTime();
 }
 
 qreal ScreenPanelGL::devicePixelRatioFromScreen() const
